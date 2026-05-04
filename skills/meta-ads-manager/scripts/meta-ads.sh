@@ -294,6 +294,7 @@ report_wow_events() {
   current_file="/tmp/meta-ads-current-7d-$$.json"
   total_file="/tmp/meta-ads-total-14d-$$.json"
   previous_file="/tmp/meta-ads-previous-7d-$$.json"
+  local demo_booked_action="${META_DEMO_BOOKED_ACTION_TYPE:-}"
 
   echo "Meta Ads Week-over-Week Events"
   [[ -n "$ACCOUNT" ]] && echo "Account: $ACCOUNT"
@@ -302,6 +303,10 @@ report_wow_events() {
   echo "Current window: last_7d"
   echo "Previous window: prior 7 days, derived from last_14d minus last_7d"
   echo ""
+
+  if [[ -z "$demo_booked_action" ]]; then
+    demo_booked_action="$(detect_demo_booked_action_type || true)"
+  fi
 
   social --no-banner marketing insights $ACCOUNT_ARG \
     --preset last_7d --level account --json \
@@ -340,10 +345,21 @@ report_wow_events() {
         metric("InitiateCheckout"; "initiate_checkout"),
         metric("Purchase"; "purchase"),
         metric("Lead"; "lead"),
-        metric("Demo Request (Schedule)"; "offsite_conversion.custom.931521642127214")
+        metric("Demo Request (Schedule)"; "offsite_conversion.custom.931521642127214"),
+        if $demoBookedAction == "" then
+          {
+            label: "Demo Booked (Calendly)",
+            action_type: null,
+            current_count: null,
+            previous_count: null,
+            unavailable: "No attributed custom conversion found. Audience rule exists for invitee_meeting_scheduled where event_type_name contains demo, but audiences do not produce cost-per-event insight actions."
+          }
+        else
+          metric("Demo Booked (Calendly)"; $demoBookedAction)
+        end
       ]
     }
-  ' > "$previous_file"
+  ' --arg demoBookedAction "$demo_booked_action" > "$previous_file"
 
   jq -r '
     def money($v): "$" + (($v // 0) | tonumber | .*100 | round / 100 | tostring);
@@ -364,14 +380,38 @@ report_wow_events() {
     "Events:\n" +
     ([
       $root.metrics[] |
-      "  " + .label + "\n" +
-      "    Current: " + (.current_count | tostring) + " at " + cpa($root.current_spend; .current_count) + "\n" +
-      "    Previous: " + (.previous_count | tostring) + " at " + cpa($root.previous_spend; .previous_count) + "\n" +
-      "    WoW count: " + pct(.current_count; .previous_count)
+      if .unavailable then
+        "  " + .label + "\n" +
+        "    Status: " + .unavailable
+      else
+        "  " + .label + "\n" +
+        "    Current: " + (.current_count | tostring) + " at " + cpa($root.current_spend; .current_count) + "\n" +
+        "    Previous: " + (.previous_count | tostring) + " at " + cpa($root.previous_spend; .previous_count) + "\n" +
+        "    WoW count: " + pct(.current_count; .previous_count)
+      end
     ] | join("\n"))
   ' "$previous_file"
 
   rm -f "$current_file" "$total_file" "$previous_file"
+}
+
+detect_demo_booked_action_type() {
+  local token="${META_TOKEN:-}"
+  if [[ -z "$token" && -f "$HOME/.social-cli/config.json" ]]; then
+    token="$(jq -r '.profiles[.activeProfile].tokens.facebook // .meta_access_token // .access_token // empty' "$HOME/.social-cli/config.json" 2>/dev/null || true)"
+  fi
+  [[ -z "$token" || -z "$ACCOUNT" ]] && return 1
+
+  local account_id="${ACCOUNT#act_}"
+  local response
+  response="$(curl -sf "https://graph.facebook.com/v19.0/act_${account_id}/customconversions?fields=id,name,custom_event_type,rule&limit=500&access_token=${token}" 2>/dev/null || true)"
+  [[ -z "$response" ]] && return 1
+
+  echo "$response" | jq -r '
+    .data[]? |
+    select((.rule | tostring | test("invitee_meeting_scheduled"; "i")) and (.rule | tostring | test("demo"; "i"))) |
+    "offsite_conversion.custom.\(.id)"
+  ' | head -1
 }
 
 # ============================================
