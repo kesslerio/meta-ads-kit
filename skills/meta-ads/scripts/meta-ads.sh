@@ -68,7 +68,17 @@ normalize_act() {
   fi
 }
 
+get_default_account() {
+  if [[ -f "$HOME/.social-cli/config.json" ]]; then
+    jq -r '.profiles[.activeProfile].defaults.marketingAdAccountId // empty' \
+      "$HOME/.social-cli/config.json" 2>/dev/null || true
+  fi
+}
+
 ACCOUNT=$(normalize_act "$ACCOUNT")
+if [[ -z "$ACCOUNT" ]]; then
+  ACCOUNT="$(normalize_act "$(get_default_account)")"
+fi
 ACCOUNT_ARG=""
 [[ -n "$ACCOUNT" ]] && ACCOUNT_ARG="$ACCOUNT"
 
@@ -106,6 +116,10 @@ require_date() {
 
 date_offset() {
   date -d "$1 $2 days" +%F
+}
+
+date_epoch_utc() {
+  TZ=UTC date -d "$1" +%s
 }
 
 resolve_current_window() {
@@ -158,7 +172,7 @@ resolve_previous_window() {
   fi
 
   local days previous_until previous_since
-  days=$(( ($(date -d "$current_until" +%s) - $(date -d "$current_since" +%s)) / 86400 + 1 ))
+  days=$(( ($(date_epoch_utc "$current_until") - $(date_epoch_utc "$current_since")) / 86400 + 1 ))
   previous_until="$(date_offset "$current_since" -1)"
   previous_since="$(date_offset "$previous_until" "$((1 - days))")"
   echo "$previous_since $previous_until"
