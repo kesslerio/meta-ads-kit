@@ -176,6 +176,33 @@ Tell me: "Show me ad performance broken down by age and gender"
 
 Script: `scripts/meta-ads.sh custom --level ad --fields "ad_name,spend,ctr,cpc" --breakdowns "age,gender"`
 
+For exact read-only date windows, use `--since` and `--until`. This uses the Meta Graph insights endpoint directly because `social marketing insights` only exposes date presets.
+
+```bash
+scripts/meta-ads.sh custom --level ad --since 2026-04-10 --until 2026-05-07 --fields "ad_name,campaign_name,spend,impressions,clicks,ctr,cpc,frequency,actions,cost_per_action_type"
+```
+
+### Funnel Event Comparison
+
+Compare Meta-attributed funnel events for the current window against the previous matching window.
+
+```bash
+scripts/meta-ads.sh wow-events
+scripts/meta-ads.sh wow-events --preset last_28d
+scripts/meta-ads.sh wow-events --since 2026-04-10 --until 2026-05-07 --compare-since 2026-03-13 --compare-until 2026-04-09
+```
+
+Rows include spend, traffic, InitiateCheckout, Purchase, Lead, Demo Request / Schedule, and Demo Booked / Calendly when Meta exposes an attributed custom conversion. If the Calendly signal only exists as a Website Custom Audience, report it as unavailable rather than zero.
+
+### Four-Week Funnel
+
+Rolling 28 days vs previous 28 days. This is the preferred one-off and scheduled Friday 1:00 am PT B2B funnel report input.
+
+```bash
+scripts/meta-ads.sh four-week-funnel
+scripts/meta-ads.sh four-week-funnel --as-of 2026-05-07
+```
+
 ---
 
 ## Date Presets
@@ -183,6 +210,7 @@ Script: `scripts/meta-ads.sh custom --level ad --fields "ad_name,spend,ctr,cpc" 
 - `today` — Today only
 - `yesterday` — Yesterday only
 - `last_7d` — Last 7 days (default for most reports)
+- `last_28d` — Last 28 days for funnel comparison reports
 - `last_30d` — Last 30 days
 - `last_90d` — Last 90 days
 

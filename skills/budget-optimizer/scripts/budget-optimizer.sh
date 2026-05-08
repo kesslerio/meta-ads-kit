@@ -30,6 +30,47 @@ done
 ACCOUNT_ARG=""
 [[ -n "$ACCOUNT" ]] && ACCOUNT_ARG="$ACCOUNT"
 
+TMPFILES=()
+cleanup() {
+  rm -f "${TMPFILES[@]}" 2>/dev/null || true
+}
+trap cleanup EXIT
+
+run_insights_json() {
+  local output_file="$1"
+  local preset="$2"
+  local level="$3"
+  local fields="$4"
+  local raw_stdout raw_stderr jq_stderr
+
+  raw_stdout="$(mktemp /tmp/budget-opt-social-stdout.XXXXXX)"
+  raw_stderr="$(mktemp /tmp/budget-opt-social-stderr.XXXXXX)"
+  jq_stderr="$(mktemp /tmp/budget-opt-jq-stderr.XXXXXX)"
+  TMPFILES+=("$raw_stdout" "$raw_stderr" "$jq_stderr")
+
+  if ! social --no-banner marketing insights $ACCOUNT_ARG \
+    --preset "$preset" --level "$level" \
+    --json --export "$output_file" --export-format json \
+    --fields "$fields" \
+    >"$raw_stdout" 2>"$raw_stderr"; then
+    echo "Meta insights command failed."
+    sed -n '1,8p' "$raw_stderr"
+    return 1
+  fi
+
+  if [[ ! -s "$output_file" ]]; then
+    echo "Meta insights returned no export data."
+    sed -n '1,8p' "$raw_stdout"
+    return 1
+  fi
+
+  if ! jq -e . "$output_file" >/dev/null 2>"$jq_stderr"; then
+    echo "Could not parse Meta insights JSON export."
+    sed -n '1,3p' "$jq_stderr"
+    return 1
+  fi
+}
+
 case "$MODE" in
   efficiency)
     echo "💰 Spend Efficiency Ranking — ${PRESET}"
@@ -37,12 +78,9 @@ case "$MODE" in
     echo ""
 
     tmpfile="/tmp/budget-opt-$$.json"
-    social --no-banner marketing insights $ACCOUNT_ARG \
-      --preset "$PRESET" --level campaign \
-      --json --fields "campaign_name,campaign_id,spend,impressions,clicks,ctr,cpc,actions,cost_per_action_type" \
-      2>/dev/null > "$tmpfile" || true
+    TMPFILES+=("$tmpfile")
 
-    if [[ -s "$tmpfile" ]]; then
+    if run_insights_json "$tmpfile" "$PRESET" campaign "campaign_name,campaign_id,spend,impressions,clicks,ctr,cpc,actions,cost_per_action_type"; then
       echo "Campaigns ranked by efficiency (CTR/CPC ratio):"
       echo ""
       jq -r '
@@ -53,8 +91,7 @@ case "$MODE" in
         sort_by(-.efficiency) |
         to_entries[] |
         "#\(.key + 1) \(.value.campaign_name // "Unknown")\n   Spend: $\(.value.spend) | CTR: \(.value.ctr)% | CPC: $\(.value.cpc) | Score: \(.value.efficiency | . * 100 | floor / 100)\n"
-      ' "$tmpfile" 2>/dev/null || echo "Could not parse campaign data"
-      rm -f "$tmpfile"
+      ' "$tmpfile" || echo "Could not rank campaign data"
     else
       echo "No campaign data available"
     fi
@@ -66,12 +103,9 @@ case "$MODE" in
     echo ""
 
     tmpfile="/tmp/budget-rec-$$.json"
-    social --no-banner marketing insights $ACCOUNT_ARG \
-      --preset last_7d --level campaign \
-      --json --fields "campaign_name,campaign_id,spend,ctr,cpc,actions,cost_per_action_type" \
-      2>/dev/null > "$tmpfile" || true
+    TMPFILES+=("$tmpfile")
 
-    if [[ -s "$tmpfile" ]]; then
+    if run_insights_json "$tmpfile" "$PRESET" campaign "campaign_name,campaign_id,spend,ctr,cpc,actions,cost_per_action_type"; then
       jq -r '
         def parse_num: if . == null then 0 elif type == "string" then (tonumber? // 0) else . end;
         (if type == "array" then . elif .data then .data else [] end) |
@@ -83,12 +117,11 @@ case "$MODE" in
         else
           "TOP PERFORMERS (increase budget):\n" +
           ($all[:($n / 3 | ceil)] | map("  🏆 \(.campaign_name) — CTR: \(.ctr)%, CPC: $\(.cpc)") | join("\n")) +
-          "\n\nUNDERPERFORERS (decrease budget):\n" +
+          "\n\nUNDERPERFORMERS (decrease budget):\n" +
           ($all[($n * 2 / 3 | floor):] | map("  🩸 \(.campaign_name) — CTR: \(.ctr)%, CPC: $\(.cpc)") | join("\n")) +
           "\n\n⚠️  These are recommendations only. Approve before I make changes."
         end
-      ' "$tmpfile" 2>/dev/null || echo "Could not generate recommendations"
-      rm -f "$tmpfile"
+      ' "$tmpfile" || echo "Could not generate recommendations from campaign data"
     else
       echo "No data for recommendations"
     fi
