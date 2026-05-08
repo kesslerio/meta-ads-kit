@@ -210,8 +210,8 @@ run_graph_insights_json() {
   require_graph_context
   token="$(get_meta_token)"
   if [[ -z "$token" ]]; then
-    echo "ERROR: no Meta token found in META_TOKEN or ~/.social-cli/config.json" >&2
-    exit 2
+    echo "WARN: no Meta token found in META_TOKEN or ~/.social-cli/config.json" >&2
+    return 1
   fi
 
   account_id="${ACCOUNT#act_}"
@@ -226,6 +226,22 @@ run_graph_insights_json() {
 
   url="https://graph.facebook.com/v19.0/act_${account_id}/insights?${query}&access_token=${token}"
   curl -sf "$url" > "$output"
+}
+
+run_social_insights_json() {
+  local output="$1"
+  local preset="$2"
+  local level="${3:-account}"
+  local fields="${4:-spend,actions,cost_per_action_type}"
+  local breakdowns="${5:-}"
+  local limit="${6:-500}"
+
+  local args=(marketing insights)
+  [[ -n "$ACCOUNT_ARG" ]] && args+=("$ACCOUNT_ARG")
+  args+=(--preset "$preset" --level "$level" --json --export "$output" --export-format json --fields "$fields" --limit "$limit")
+  [[ -n "$breakdowns" ]] && args+=(--breakdowns "$breakdowns")
+
+  social --no-banner "${args[@]}" >/dev/null 2>/dev/null
 }
 
 detect_demo_booked_action_type() {
@@ -469,18 +485,65 @@ report_custom() {
 # ============================================
 # REPORT: event comparisons
 # ============================================
-render_event_comparison() {
+format_event_comparison() {
+  local comparison_file="$1"
+
+  jq -r '
+    def money($v): "$" + (($v // 0) | tonumber | .*100 | round / 100 | tostring);
+    def pct($current; $previous):
+      if $previous == null then "unavailable"
+      elif ($previous // 0) == 0 then
+        if ($current // 0) == 0 then "0%" else "new" end
+      else
+        (((($current - $previous) / $previous) * 10000 | round / 100) | tostring) + "%"
+      end;
+    def delta($current; $previous):
+      if $previous == null then "unavailable"
+      else
+        (($current // 0) - ($previous // 0)) as $d |
+        if $d > 0 then "+" + ($d | tostring) else ($d | tostring) end
+      end;
+    def cpa($spend; $count):
+      if $spend == null or $count == null or ($count // 0) == 0 then "n/a" else money($spend / $count) end;
+    def maybe_num($v): if $v == null then "unavailable" else ($v | tostring) end;
+
+    . as $root |
+    "Spend:\n" +
+    "  Current: " + money($root.current_spend) + "\n" +
+    "  Previous: " + (if $root.previous_spend == null then "unavailable" else money($root.previous_spend) end) + "\n" +
+    "  Change: " + pct($root.current_spend; $root.previous_spend) + "\n\n" +
+    "Traffic:\n" +
+    "  Impressions: " + maybe_num($root.current_impressions) + " vs " + maybe_num($root.previous_impressions) + " (" + delta($root.current_impressions; $root.previous_impressions) + ", " + pct($root.current_impressions; $root.previous_impressions) + ")\n" +
+    "  Clicks: " + maybe_num($root.current_clicks) + " vs " + maybe_num($root.previous_clicks) + " (" + delta($root.current_clicks; $root.previous_clicks) + ", " + pct($root.current_clicks; $root.previous_clicks) + ")\n\n" +
+    "Events:\n" +
+    ([
+      $root.metrics[] |
+      if .unavailable then
+        "  " + .label + "\n" +
+        "    Status: " + .unavailable
+      else
+        "  " + .label + "\n" +
+        "    Current: " + (.current_count | tostring) + " at " + cpa($root.current_spend; .current_count) + "\n" +
+        "    Previous: " + (if .previous_count == null then "unavailable" else (.previous_count | tostring) + " at " + cpa($root.previous_spend; .previous_count) end) + "\n" +
+        "    Count change: " + delta(.current_count; .previous_count) + " (" + pct(.current_count; .previous_count) + ")"
+      end
+    ] | join("\n")) +
+    (if $root.fallback_note then "\n\nData note: " + $root.fallback_note else "" end)
+  ' "$comparison_file"
+}
+
+render_event_comparison_social_fallback() {
   local title="$1"
   local current_since="$2"
   local current_until="$3"
   local previous_since="$4"
   local previous_until="$5"
-  local current_file previous_file comparison_file
-  local demo_booked_action="${META_DEMO_BOOKED_ACTION_TYPE:-}"
+  local fallback_preset="$6"
+  local current_file total_file comparison_file total_preset
 
-  current_file="/tmp/meta-ads-current-events-$$.json"
-  previous_file="/tmp/meta-ads-previous-events-$$.json"
-  comparison_file="/tmp/meta-ads-event-comparison-$$.json"
+  current_file="/tmp/meta-ads-current-social-$$.json"
+  total_file="/tmp/meta-ads-total-social-$$.json"
+  comparison_file="/tmp/meta-ads-event-comparison-social-$$.json"
 
   echo "$title"
   [[ -n "$ACCOUNT" ]] && echo "Account: $ACCOUNT"
@@ -490,17 +553,148 @@ render_event_comparison() {
   echo "Previous window: ${previous_since} to ${previous_until}"
   echo ""
 
+  case "$fallback_preset" in
+    last_7d) total_preset="last_14d" ;;
+    last_28d) total_preset="" ;;
+    *)
+      echo "No Graph token available, and social-cli fallback does not support ${fallback_preset} comparisons."
+      rm -f "$current_file" "$total_file" "$comparison_file"
+      return 1
+      ;;
+  esac
+
+  if ! run_social_insights_json "$current_file" "$fallback_preset" account "spend,impressions,clicks,actions,cost_per_action_type" "" 500; then
+    echo "No Meta insights data available from social-cli fallback"
+    rm -f "$current_file" "$total_file" "$comparison_file"
+    return 1
+  fi
+
+  if [[ -n "$total_preset" ]]; then
+    run_social_insights_json "$total_file" "$total_preset" account "spend,impressions,clicks,actions,cost_per_action_type" "" 500 || true
+  fi
+
+  if [[ -n "$total_preset" && -s "$total_file" ]]; then
+    jq -n --slurpfile current "$current_file" --slurpfile total "$total_file" '
+      def firstrow($x): (($x[0] // []) | if type == "array" then .[0] elif .data then .data[0] else . end) // {};
+      def num: if . == null then 0 elif type == "string" then (tonumber? // 0) else . end;
+      def action($row; $name):
+        ($row.actions // [] | map(select(.action_type == $name)) | .[0].value // 0) | num;
+      def metric($label; $action):
+        {
+          label: $label,
+          action_type: $action,
+          current_count: action(firstrow($current); $action),
+          previous_count: (action(firstrow($total); $action) - action(firstrow($current); $action))
+        };
+      firstrow($current) as $c |
+      firstrow($total) as $t |
+      {
+        current_spend: ($c.spend | num),
+        previous_spend: (($t.spend | num) - ($c.spend | num)),
+        current_impressions: ($c.impressions | num),
+        previous_impressions: (($t.impressions | num) - ($c.impressions | num)),
+        current_clicks: ($c.clicks | num),
+        previous_clicks: (($t.clicks | num) - ($c.clicks | num)),
+        fallback_note: "Used social-cli preset exports because no directly readable Graph token was available; Demo Booked custom-conversion discovery is unavailable without Graph access.",
+        metrics: [
+          metric("InitiateCheckout"; "initiate_checkout"),
+          metric("Purchase"; "purchase"),
+          metric("Lead"; "lead"),
+          metric("Demo Request (Schedule)"; "offsite_conversion.custom.931521642127214"),
+          {
+            label: "Demo Booked (Calendly / Qualified Booking)",
+            action_type: null,
+            current_count: null,
+            previous_count: null,
+            unavailable: "No Graph token available for custom-conversion discovery."
+          }
+        ]
+      }
+    ' > "$comparison_file"
+  else
+    jq -n --slurpfile current "$current_file" '
+      def firstrow($x): (($x[0] // []) | if type == "array" then .[0] elif .data then .data[0] else . end) // {};
+      def num: if . == null then 0 elif type == "string" then (tonumber? // 0) else . end;
+      def action($row; $name):
+        ($row.actions // [] | map(select(.action_type == $name)) | .[0].value // 0) | num;
+      def metric($label; $action):
+        {
+          label: $label,
+          action_type: $action,
+          current_count: action(firstrow($current); $action),
+          previous_count: null
+        };
+      firstrow($current) as $c |
+      {
+        current_spend: ($c.spend | num),
+        previous_spend: null,
+        current_impressions: ($c.impressions | num),
+        previous_impressions: null,
+        current_clicks: ($c.clicks | num),
+        previous_clicks: null,
+        fallback_note: "Used social-cli current-window export because no directly readable Graph token was available; prior-window comparison requires Graph date windows.",
+        metrics: [
+          metric("InitiateCheckout"; "initiate_checkout"),
+          metric("Purchase"; "purchase"),
+          metric("Lead"; "lead"),
+          metric("Demo Request (Schedule)"; "offsite_conversion.custom.931521642127214"),
+          {
+            label: "Demo Booked (Calendly / Qualified Booking)",
+            action_type: null,
+            current_count: null,
+            previous_count: null,
+            unavailable: "No Graph token available for custom-conversion discovery."
+          }
+        ]
+      }
+    ' > "$comparison_file"
+  fi
+
+  format_event_comparison "$comparison_file"
+  rm -f "$current_file" "$total_file" "$comparison_file"
+}
+
+render_event_comparison() {
+  local title="$1"
+  local current_since="$2"
+  local current_until="$3"
+  local previous_since="$4"
+  local previous_until="$5"
+  local fallback_preset="${6:-}"
+  local current_file previous_file comparison_file
+  local demo_booked_action="${META_DEMO_BOOKED_ACTION_TYPE:-}"
+
+  current_file="/tmp/meta-ads-current-events-$$.json"
+  previous_file="/tmp/meta-ads-previous-events-$$.json"
+  comparison_file="/tmp/meta-ads-event-comparison-$$.json"
+
   if [[ -z "$demo_booked_action" ]]; then
     demo_booked_action="$(detect_demo_booked_action_type || true)"
   fi
 
-  run_graph_insights_json \
+  if ! run_graph_insights_json \
     "$current_file" "$current_since" "$current_until" account \
-    "spend,impressions,clicks,actions,cost_per_action_type" "" 500
+    "spend,impressions,clicks,actions,cost_per_action_type" "" 500; then
+    rm -f "$current_file" "$previous_file" "$comparison_file"
+    render_event_comparison_social_fallback "$title" "$current_since" "$current_until" "$previous_since" "$previous_until" "$fallback_preset"
+    return
+  fi
 
-  run_graph_insights_json \
+  if ! run_graph_insights_json \
     "$previous_file" "$previous_since" "$previous_until" account \
-    "spend,impressions,clicks,actions,cost_per_action_type" "" 500
+    "spend,impressions,clicks,actions,cost_per_action_type" "" 500; then
+    rm -f "$current_file" "$previous_file" "$comparison_file"
+    render_event_comparison_social_fallback "$title" "$current_since" "$current_until" "$previous_since" "$previous_until" "$fallback_preset"
+    return
+  fi
+
+  echo "$title"
+  [[ -n "$ACCOUNT" ]] && echo "Account: $ACCOUNT"
+  echo "================================"
+  echo ""
+  echo "Current window: ${current_since} to ${current_until}"
+  echo "Previous window: ${previous_since} to ${previous_until}"
+  echo ""
 
   if [[ ! -s "$current_file" || ! -s "$previous_file" ]]; then
     echo "No Meta insights data available for event comparison"
@@ -549,42 +743,7 @@ render_event_comparison() {
     }
   ' --arg demoBookedAction "$demo_booked_action" > "$comparison_file"
 
-  jq -r '
-    def money($v): "$" + (($v // 0) | tonumber | .*100 | round / 100 | tostring);
-    def pct($current; $previous):
-      if ($previous // 0) == 0 then
-        if ($current // 0) == 0 then "0%" else "new" end
-      else
-        (((($current - $previous) / $previous) * 10000 | round / 100) | tostring) + "%"
-      end;
-    def delta($current; $previous):
-      (($current // 0) - ($previous // 0)) as $d |
-      if $d > 0 then "+" + ($d | tostring) else ($d | tostring) end;
-    def cpa($spend; $count):
-      if ($count // 0) == 0 then "n/a" else money($spend / $count) end;
-
-    . as $root |
-    "Spend:\n" +
-    "  Current: " + money($root.current_spend) + "\n" +
-    "  Previous: " + money($root.previous_spend) + "\n" +
-    "  Change: " + pct($root.current_spend; $root.previous_spend) + "\n\n" +
-    "Traffic:\n" +
-    "  Impressions: " + ($root.current_impressions | tostring) + " vs " + ($root.previous_impressions | tostring) + " (" + delta($root.current_impressions; $root.previous_impressions) + ", " + pct($root.current_impressions; $root.previous_impressions) + ")\n" +
-    "  Clicks: " + ($root.current_clicks | tostring) + " vs " + ($root.previous_clicks | tostring) + " (" + delta($root.current_clicks; $root.previous_clicks) + ", " + pct($root.current_clicks; $root.previous_clicks) + ")\n\n" +
-    "Events:\n" +
-    ([
-      $root.metrics[] |
-      if .unavailable then
-        "  " + .label + "\n" +
-        "    Status: " + .unavailable
-      else
-        "  " + .label + "\n" +
-        "    Current: " + (.current_count | tostring) + " at " + cpa($root.current_spend; .current_count) + "\n" +
-        "    Previous: " + (.previous_count | tostring) + " at " + cpa($root.previous_spend; .previous_count) + "\n" +
-        "    Count change: " + delta(.current_count; .previous_count) + " (" + pct(.current_count; .previous_count) + ")"
-      end
-    ] | join("\n"))
-  ' "$comparison_file"
+  format_event_comparison "$comparison_file"
 
   rm -f "$current_file" "$previous_file" "$comparison_file"
 }
@@ -595,7 +754,7 @@ report_event_comparison_for_preset() {
   read -r current_since current_until <<< "$current_window"
   previous_window="$(resolve_previous_window "$current_since" "$current_until")"
   read -r previous_since previous_until <<< "$previous_window"
-  render_event_comparison "Meta Ads Funnel Event Comparison" "$current_since" "$current_until" "$previous_since" "$previous_until"
+  render_event_comparison "Meta Ads Funnel Event Comparison" "$current_since" "$current_until" "$previous_since" "$previous_until" "$PRESET"
 }
 
 report_four_week_funnel() {
