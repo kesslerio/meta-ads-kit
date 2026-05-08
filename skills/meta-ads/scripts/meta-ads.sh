@@ -9,7 +9,9 @@
 #   meta-ads.sh bleeders [--account act_123] [--preset last_7d] [--cpa-threshold 50]
 #   meta-ads.sh winners [--account act_123] [--preset last_7d]
 #   meta-ads.sh fatigue-check [--account act_123]
-#   meta-ads.sh custom [--account act_123] [--level ad] [--fields ...] [--breakdowns ...]
+#   meta-ads.sh wow-events [--account act_123] [--preset last_7d|last_28d]
+#   meta-ads.sh four-week-funnel [--account act_123] [--as-of YYYY-MM-DD]
+#   meta-ads.sh custom [--account act_123] [--level ad] [--fields ...] [--breakdowns ...] [--since YYYY-MM-DD --until YYYY-MM-DD]
 
 set -euo pipefail
 
@@ -30,6 +32,11 @@ CPA_THRESHOLD=""
 LEVEL=""
 FIELDS=""
 BREAKDOWNS=""
+SINCE=""
+UNTIL=""
+COMPARE_SINCE=""
+COMPARE_UNTIL=""
+AS_OF=""
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -42,6 +49,11 @@ while [[ $# -gt 0 ]]; do
     --level)      LEVEL="$2"; shift 2 ;;
     --fields)     FIELDS="$2"; shift 2 ;;
     --breakdowns) BREAKDOWNS="$2"; shift 2 ;;
+    --since)      SINCE="$2"; shift 2 ;;
+    --until)      UNTIL="$2"; shift 2 ;;
+    --compare-since) COMPARE_SINCE="$2"; shift 2 ;;
+    --compare-until) COMPARE_UNTIL="$2"; shift 2 ;;
+    --as-of)      AS_OF="$2"; shift 2 ;;
     *)            echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -82,6 +94,142 @@ run_social_table() {
 fmt_num() { printf "%'d" "${1:-0}" 2>/dev/null || echo "${1:-0}"; }
 fmt_money() { printf "$%'.2f" "${1:-0}" 2>/dev/null || echo "\$${1:-0}"; }
 fmt_pct() { printf "%.1f%%" "${1:-0}" 2>/dev/null || echo "${1:-0}%"; }
+
+require_date() {
+  local value="$1"
+  local label="$2"
+  if [[ ! "$value" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    echo "ERROR: $label must be YYYY-MM-DD, got: $value" >&2
+    exit 2
+  fi
+}
+
+date_offset() {
+  date -d "$1 $2 days" +%F
+}
+
+resolve_current_window() {
+  local preset="$1"
+  local as_of="${AS_OF:-$(date +%F)}"
+  require_date "$as_of" "--as-of"
+
+  if [[ -n "$SINCE" || -n "$UNTIL" ]]; then
+    [[ -n "$SINCE" && -n "$UNTIL" ]] || {
+      echo "ERROR: --since and --until must be provided together" >&2
+      exit 2
+    }
+    require_date "$SINCE" "--since"
+    require_date "$UNTIL" "--until"
+    echo "$SINCE $UNTIL"
+    return
+  fi
+
+  case "$preset" in
+    today)     echo "$as_of $as_of" ;;
+    yesterday)
+      local yesterday
+      yesterday="$(date_offset "$as_of" -1)"
+      echo "$yesterday $yesterday"
+      ;;
+    last_7d)   echo "$(date_offset "$as_of" -6) $as_of" ;;
+    last_28d)  echo "$(date_offset "$as_of" -27) $as_of" ;;
+    last_30d)  echo "$(date_offset "$as_of" -29) $as_of" ;;
+    last_90d)  echo "$(date_offset "$as_of" -89) $as_of" ;;
+    *)
+      echo "ERROR: unsupported preset for comparison report: $preset" >&2
+      exit 2
+      ;;
+  esac
+}
+
+resolve_previous_window() {
+  local current_since="$1"
+  local current_until="$2"
+
+  if [[ -n "$COMPARE_SINCE" || -n "$COMPARE_UNTIL" ]]; then
+    [[ -n "$COMPARE_SINCE" && -n "$COMPARE_UNTIL" ]] || {
+      echo "ERROR: --compare-since and --compare-until must be provided together" >&2
+      exit 2
+    }
+    require_date "$COMPARE_SINCE" "--compare-since"
+    require_date "$COMPARE_UNTIL" "--compare-until"
+    echo "$COMPARE_SINCE $COMPARE_UNTIL"
+    return
+  fi
+
+  local days previous_until previous_since
+  days=$(( ($(date -d "$current_until" +%s) - $(date -d "$current_since" +%s)) / 86400 + 1 ))
+  previous_until="$(date_offset "$current_since" -1)"
+  previous_since="$(date_offset "$previous_until" "$((1 - days))")"
+  echo "$previous_since $previous_until"
+}
+
+get_meta_token() {
+  if [[ -n "${META_TOKEN:-}" ]]; then
+    echo "$META_TOKEN"
+    return
+  fi
+
+  if [[ -f "$HOME/.social-cli/config.json" ]]; then
+    jq -r '.profiles[.activeProfile].tokens.facebook // .meta_access_token // .access_token // empty' \
+      "$HOME/.social-cli/config.json" 2>/dev/null || true
+  fi
+}
+
+require_graph_context() {
+  if [[ -z "$ACCOUNT" ]]; then
+    echo "ERROR: explicit date-window reports require --account or META_AD_ACCOUNT" >&2
+    exit 2
+  fi
+}
+
+run_graph_insights_json() {
+  local output="$1"
+  local since="$2"
+  local until="$3"
+  local level="${4:-account}"
+  local fields="${5:-spend,actions,cost_per_action_type}"
+  local breakdowns="${6:-}"
+  local limit="${7:-500}"
+  local token account_id time_range query url
+
+  require_graph_context
+  token="$(get_meta_token)"
+  if [[ -z "$token" ]]; then
+    echo "ERROR: no Meta token found in META_TOKEN or ~/.social-cli/config.json" >&2
+    exit 2
+  fi
+
+  account_id="${ACCOUNT#act_}"
+  time_range="$(jq -nc --arg since "$since" --arg until "$until" '{since:$since,until:$until}')"
+  query="fields=$(jq -nr --arg v "$fields" '$v|@uri')"
+  query="${query}&level=$(jq -nr --arg v "$level" '$v|@uri')"
+  query="${query}&time_range=$(jq -nr --arg v "$time_range" '$v|@uri')"
+  query="${query}&limit=$(jq -nr --arg v "$limit" '$v|@uri')"
+  if [[ -n "$breakdowns" ]]; then
+    query="${query}&breakdowns=$(jq -nr --arg v "$breakdowns" '$v|@uri')"
+  fi
+
+  url="https://graph.facebook.com/v19.0/act_${account_id}/insights?${query}&access_token=${token}"
+  curl -sf "$url" > "$output"
+}
+
+detect_demo_booked_action_type() {
+  local token account_id response
+
+  token="$(get_meta_token)"
+  [[ -z "$token" || -z "$ACCOUNT" ]] && return 1
+
+  account_id="${ACCOUNT#act_}"
+  response="$(curl -sf "https://graph.facebook.com/v19.0/act_${account_id}/customconversions?fields=id,name,custom_event_type,rule&limit=500&access_token=${token}" 2>/dev/null || true)"
+  [[ -z "$response" ]] && return 1
+
+  echo "$response" | jq -r '
+    .data[]? |
+    select((.rule | tostring | test("invitee_meeting_scheduled"; "i")) and (.rule | tostring | test("demo"; "i"))) |
+    "offsite_conversion.custom.\(.id)"
+  ' | head -1
+}
 
 # ============================================
 # REPORT: daily-check (The 5 Daily Questions)
@@ -275,15 +423,170 @@ report_fatigue_check() {
 # REPORT: custom
 # ============================================
 report_custom() {
+  local level="${LEVEL:-account}"
+  local fields="${FIELDS:-spend,impressions,clicks,ctr,cpc,cpm}"
+
+  if [[ -n "$SINCE" || -n "$UNTIL" ]]; then
+    [[ -n "$SINCE" && -n "$UNTIL" ]] || {
+      echo "ERROR: --since and --until must be provided together" >&2
+      exit 2
+    }
+    require_date "$SINCE" "--since"
+    require_date "$UNTIL" "--until"
+
+    local tmpfile="/tmp/meta-ads-custom-$$.json"
+    run_graph_insights_json "$tmpfile" "$SINCE" "$UNTIL" "$level" "$fields" "$BREAKDOWNS" "$LIMIT"
+    jq . "$tmpfile"
+    rm -f "$tmpfile"
+    return
+  fi
+
   local args=()
   [[ -n "$ACCOUNT_ARG" ]] && args+=("$ACCOUNT_ARG")
   [[ -n "$PRESET" ]] && args+=(--preset "$PRESET")
-  [[ -n "$LEVEL" ]] && args+=(--level "$LEVEL")
-  [[ -n "$FIELDS" ]] && args+=(--fields "$FIELDS")
+  [[ -n "$level" ]] && args+=(--level "$level")
+  [[ -n "$fields" ]] && args+=(--fields "$fields")
   [[ -n "$BREAKDOWNS" ]] && args+=(--breakdowns "$BREAKDOWNS")
   [[ -n "$LIMIT" ]] && args+=(--limit "$LIMIT")
 
   run_social_table marketing insights "${args[@]}"
+}
+
+# ============================================
+# REPORT: event comparisons
+# ============================================
+render_event_comparison() {
+  local title="$1"
+  local current_since="$2"
+  local current_until="$3"
+  local previous_since="$4"
+  local previous_until="$5"
+  local current_file previous_file comparison_file
+  local demo_booked_action="${META_DEMO_BOOKED_ACTION_TYPE:-}"
+
+  current_file="/tmp/meta-ads-current-events-$$.json"
+  previous_file="/tmp/meta-ads-previous-events-$$.json"
+  comparison_file="/tmp/meta-ads-event-comparison-$$.json"
+
+  echo "$title"
+  [[ -n "$ACCOUNT" ]] && echo "Account: $ACCOUNT"
+  echo "================================"
+  echo ""
+  echo "Current window: ${current_since} to ${current_until}"
+  echo "Previous window: ${previous_since} to ${previous_until}"
+  echo ""
+
+  if [[ -z "$demo_booked_action" ]]; then
+    demo_booked_action="$(detect_demo_booked_action_type || true)"
+  fi
+
+  run_graph_insights_json \
+    "$current_file" "$current_since" "$current_until" account \
+    "spend,impressions,clicks,actions,cost_per_action_type" "" 500
+
+  run_graph_insights_json \
+    "$previous_file" "$previous_since" "$previous_until" account \
+    "spend,impressions,clicks,actions,cost_per_action_type" "" 500
+
+  if [[ ! -s "$current_file" || ! -s "$previous_file" ]]; then
+    echo "No Meta insights data available for event comparison"
+    rm -f "$current_file" "$previous_file" "$comparison_file"
+    return 1
+  fi
+
+  jq -n --slurpfile current "$current_file" --slurpfile previous "$previous_file" '
+    def firstrow($x): (($x[0] // []) | if type == "array" then .[0] elif .data then .data[0] else . end) // {};
+    def num: if . == null then 0 elif type == "string" then (tonumber? // 0) else . end;
+    def action($row; $name):
+      ($row.actions // [] | map(select(.action_type == $name)) | .[0].value // 0) | num;
+    def metric($label; $action):
+      {
+        label: $label,
+        action_type: $action,
+        current_count: action(firstrow($current); $action),
+        previous_count: action(firstrow($previous); $action)
+      };
+    firstrow($current) as $c |
+    firstrow($previous) as $p |
+    {
+      current_spend: ($c.spend | num),
+      previous_spend: ($p.spend | num),
+      current_impressions: ($c.impressions | num),
+      previous_impressions: ($p.impressions | num),
+      current_clicks: ($c.clicks | num),
+      previous_clicks: ($p.clicks | num),
+      metrics: [
+        metric("InitiateCheckout"; "initiate_checkout"),
+        metric("Purchase"; "purchase"),
+        metric("Lead"; "lead"),
+        metric("Demo Request (Schedule)"; "offsite_conversion.custom.931521642127214"),
+        if $demoBookedAction == "" then
+          {
+            label: "Demo Booked (Calendly / Qualified Booking)",
+            action_type: null,
+            current_count: null,
+            previous_count: null,
+            unavailable: "No attributed custom conversion found. Audience rule exists for invitee_meeting_scheduled where event_type_name contains demo, but audiences do not produce cost-per-event insight actions."
+          }
+        else
+          metric("Demo Booked (Calendly / Qualified Booking)"; $demoBookedAction)
+        end
+      ]
+    }
+  ' --arg demoBookedAction "$demo_booked_action" > "$comparison_file"
+
+  jq -r '
+    def money($v): "$" + (($v // 0) | tonumber | .*100 | round / 100 | tostring);
+    def pct($current; $previous):
+      if ($previous // 0) == 0 then
+        if ($current // 0) == 0 then "0%" else "new" end
+      else
+        (((($current - $previous) / $previous) * 10000 | round / 100) | tostring) + "%"
+      end;
+    def delta($current; $previous):
+      (($current // 0) - ($previous // 0)) as $d |
+      if $d > 0 then "+" + ($d | tostring) else ($d | tostring) end;
+    def cpa($spend; $count):
+      if ($count // 0) == 0 then "n/a" else money($spend / $count) end;
+
+    . as $root |
+    "Spend:\n" +
+    "  Current: " + money($root.current_spend) + "\n" +
+    "  Previous: " + money($root.previous_spend) + "\n" +
+    "  Change: " + pct($root.current_spend; $root.previous_spend) + "\n\n" +
+    "Traffic:\n" +
+    "  Impressions: " + ($root.current_impressions | tostring) + " vs " + ($root.previous_impressions | tostring) + " (" + delta($root.current_impressions; $root.previous_impressions) + ", " + pct($root.current_impressions; $root.previous_impressions) + ")\n" +
+    "  Clicks: " + ($root.current_clicks | tostring) + " vs " + ($root.previous_clicks | tostring) + " (" + delta($root.current_clicks; $root.previous_clicks) + ", " + pct($root.current_clicks; $root.previous_clicks) + ")\n\n" +
+    "Events:\n" +
+    ([
+      $root.metrics[] |
+      if .unavailable then
+        "  " + .label + "\n" +
+        "    Status: " + .unavailable
+      else
+        "  " + .label + "\n" +
+        "    Current: " + (.current_count | tostring) + " at " + cpa($root.current_spend; .current_count) + "\n" +
+        "    Previous: " + (.previous_count | tostring) + " at " + cpa($root.previous_spend; .previous_count) + "\n" +
+        "    Count change: " + delta(.current_count; .previous_count) + " (" + pct(.current_count; .previous_count) + ")"
+      end
+    ] | join("\n"))
+  ' "$comparison_file"
+
+  rm -f "$current_file" "$previous_file" "$comparison_file"
+}
+
+report_event_comparison_for_preset() {
+  local current_window previous_window current_since current_until previous_since previous_until
+  current_window="$(resolve_current_window "$PRESET")"
+  read -r current_since current_until <<< "$current_window"
+  previous_window="$(resolve_previous_window "$current_since" "$current_until")"
+  read -r previous_since previous_until <<< "$previous_window"
+  render_event_comparison "Meta Ads Funnel Event Comparison" "$current_since" "$current_until" "$previous_since" "$previous_until"
+}
+
+report_four_week_funnel() {
+  PRESET="last_28d"
+  report_event_comparison_for_preset
 }
 
 # ============================================
@@ -297,10 +600,12 @@ case "$MODE" in
   bleeders|losers)                    report_bleeders ;;
   winners|tops)                       report_winners ;;
   fatigue-check|fatigue)              report_fatigue_check ;;
+  wow-events|events-wow|weekly-events) report_event_comparison_for_preset ;;
+  four-week-funnel|4week-funnel|four-week-events|28d-events) report_four_week_funnel ;;
   custom)                             report_custom ;;
   *)
     echo "Unknown mode: $MODE" >&2
-    echo "Available: daily-check, overview, campaigns, top-creatives, bleeders, winners, fatigue-check, custom" >&2
+    echo "Available: daily-check, overview, campaigns, top-creatives, bleeders, winners, fatigue-check, wow-events, four-week-funnel, custom" >&2
     exit 1
     ;;
 esac
