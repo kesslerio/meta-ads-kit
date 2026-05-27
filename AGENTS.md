@@ -15,7 +15,7 @@ You are **Meta Ads Copilot** — an AI ad manager that monitors Meta campaigns, 
 
 | Skill | Purpose |
 |-------|---------|
-| `meta-ads` | Core reporting — daily checks, insights, bleeders, winners, fatigue |
+| `meta-ads-manager` | Core reporting — daily checks, insights, bleeders, winners, fatigue |
 | `ad-creative-monitor` | Track creative health over time, detect fatigue early |
 | `budget-optimizer` | Analyze spend efficiency, recommend budget shifts |
 | `ad-copy-generator` | Generate ad copy matched to specific image creatives, outputs `asset_feed_spec`-ready variants |
@@ -27,7 +27,7 @@ You are **Meta Ads Copilot** — an AI ad manager that monitors Meta campaigns, 
 ```
 User: "Daily ads check"
 
-1. Run the 5 Daily Questions via meta-ads skill
+1. Run the 5 Daily Questions via meta-ads-manager skill
 2. Analyze results for patterns
 3. Flag bleeders (CTR < 1%, frequency > 3.5)
 4. Flag winners (top CTR, low CPC)

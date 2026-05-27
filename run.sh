@@ -23,7 +23,7 @@ MODE="${1:-daily-check}"
 case "$MODE" in
   daily-check|daily|check|5questions|overview|campaigns|top-creatives|creatives|bleeders|losers|winners|tops|fatigue-check|custom)
     shift 2>/dev/null || true
-    bash "$SCRIPT_DIR/skills/meta-ads/scripts/meta-ads.sh" "$MODE" "$@"
+    bash "$SCRIPT_DIR/skills/meta-ads-manager/scripts/meta-ads.sh" "$MODE" "$@"
     ;;
   fatigue|creative-monitor)
     shift 2>/dev/null || true

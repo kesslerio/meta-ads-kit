@@ -92,7 +92,7 @@ openclaw start
 
 | Skill | What It Does |
 |-------|-------------|
-| `meta-ads` | Core reporting — daily checks, campaign insights, bleeders, winners, fatigue detection |
+| `meta-ads-manager` | Core reporting — daily checks, campaign insights, bleeders, winners, fatigue detection |
 | `ad-creative-monitor` | Track creative performance over time, detect fatigue before it kills your ROAS |
 | `budget-optimizer` | Analyze spend efficiency, recommend budget shifts between campaigns/adsets |
 | `ad-copy-generator` | Generate ad copy matched to specific image creatives — analyzes the visual, writes copy that reinforces it, outputs `asset_feed_spec`-ready variants |
@@ -106,7 +106,7 @@ Each skill can run standalone or as part of the daily routine.
 The five skills chain together into a closed loop:
 
 ```
-Monitor (meta-ads) → Detect fatigue (ad-creative-monitor) → Shift budget (budget-optimizer)
+Monitor (meta-ads-manager) → Detect fatigue (ad-creative-monitor) → Shift budget (budget-optimizer)
     → Generate new copy (ad-copy-generator) → Upload to Meta (ad-upload) → Monitor again
 
 Pixel + CAPI (pixel-capi) runs alongside: audit tracking, test server events, optimize EMQ
@@ -240,7 +240,7 @@ meta-ads-kit/
 ├── .env.example           # Environment template
 ├── ad-config.example.json # Benchmarks template
 ├── skills/
-│   ├── meta-ads/             # Core reporting & actions
+│   ├── meta-ads-manager/     # Core reporting & actions
 │   ├── ad-creative-monitor/  # Creative fatigue tracking
 │   ├── budget-optimizer/     # Spend efficiency analysis
 │   ├── ad-copy-generator/    # AI copy matched to image creatives
