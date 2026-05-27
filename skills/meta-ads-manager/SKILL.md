@@ -1,6 +1,6 @@
 ---
 name: meta-ads-manager
-description: "Meta Ads read-only reporting alias for OpenClaw workspaces that already use meta-ads for copy generation. Provides daily checks, campaign performance, winners, bleeders, and fatigue reporting through social-cli."
+description: "Meta Ads management and reporting via social-cli: daily checks, campaign performance, creative fatigue, bleeders, winners, and safe recommendations. Use meta-ads-manager when meta-ads is reserved for copy generation."
 metadata:
   openclaw:
     emoji: "📣"
@@ -10,34 +10,287 @@ metadata:
       env: []
 ---
 
-# Meta Ads Manager
+# Meta Ads Manager — Your AI Ad Manager
 
-This is the OpenClaw alias for the Meta Ads Kit reporting skill.
+Stop clicking through Ads Manager. This skill wraps [social-cli](https://github.com/vishalgojha/social-CLI) to give you the five things that actually matter about your Meta campaigns — in plain text, every day.
 
-Use this skill for read-only Meta Ads reporting:
+The thesis: 90% of ad management is pattern recognition. Spend trending up or down. CTR declining (creative fatigue). CPA spiking (audience exhaustion). Winners emerging. Losers bleeding.
 
-- Daily Meta Ads Check
-- Week-over-week spend and conversion-event comparison
-- Rolling 28-day vs previous-28-day funnel comparison
-- Custom read-only insight pulls by preset or exact date window
-- Campaign performance
-- Winners and bleeders
-- Creative fatigue signals
+This skill spots the patterns. You make the calls.
 
-The local `meta-ads` skill name is already used by ShapeScale ad-copy guidance in some workspaces, so this alias exposes the Meta Ads Kit reporting wrapper as `meta-ads-manager` without overwriting that skill.
+This skill is named `meta-ads-manager` so workspaces can keep `meta-ads` reserved for ad-copy generation while this kit owns reporting and monitoring.
 
-## Scripts
+Read `workspace/brand/` per the _vibe-system protocol
+
+Follow all output formatting rules from the _vibe-system output format
+
+---
+
+## Brand Memory Integration
+
+**Reads:** `stack.md`, `creative-kit.md`, `audience.md`, `learnings.md` (all optional)
+
+| File | What it provides | How it shapes output |
+|------|-----------------|---------------------|
+| `workspace/brand/stack.md` | Stored ad account ID, target CPA/ROAS | Auto-fills account, benchmarks performance against targets |
+| `workspace/brand/creative-kit.md` | Brand creative guidelines, assets | Context for creative recommendations |
+| `workspace/brand/audience.md` | Target audience profiles | Interprets audience performance data |
+| `workspace/brand/learnings.md` | Past performance patterns | Spots recurring issues — "this happened last month too" |
+
+### Writes
+
+| File | What it contains |
+|------|-----------------|
+| `workspace/brand/stack.md` | Stores ad account ID on first use |
+| `workspace/brand/learnings.md` | Appends performance findings, fatigue patterns, winning creative traits |
+
+---
+
+## Setup (One Time)
+
+### 1. Install social-cli
 
 ```bash
-scripts/meta-ads.sh daily-check
-scripts/meta-ads.sh wow-events
-scripts/meta-ads.sh wow-events --preset last_28d
-scripts/meta-ads.sh four-week-funnel
-scripts/meta-ads.sh overview --preset last_7d
-scripts/meta-ads.sh custom --level campaign --fields "campaign_name,spend,impressions,clicks,actions,cost_per_action_type"
+npm install -g @vishalgojha/social-cli
+```
+
+### 2. Create a Meta App (if you don't have one)
+
+1. Go to [developers.facebook.com](https://developers.facebook.com) → My Apps → Create App
+2. Choose "Business" type
+3. Add "Marketing API" product
+4. Note your App ID and App Secret
+
+### 3. Authenticate
+
+```bash
+social auth login
+# Opens browser → approve → done
+```
+
+Or with app credentials:
+```bash
+social auth set-app --app-id YOUR_APP_ID --app-secret YOUR_APP_SECRET
+social auth login --scopes ads_read,ads_management,read_insights
+```
+
+### 4. Set default ad account
+
+```bash
+social marketing accounts          # Lists your ad accounts
+social marketing set-default-account act_123456
+```
+
+Or set env: `export META_AD_ACCOUNT=act_123456`
+
+---
+
+## Reports
+
+### The 5 Daily Questions ← Start Here
+
+The core of the system. Five questions that replace 20 minutes of Ads Manager clicking:
+
+1. **Am I on track?** — Today's spend vs expectations
+2. **What's running?** — Active campaigns at a glance
+3. **How's performance?** — 7-day metrics by campaign
+4. **Who's winning/losing?** — Ad-level performance sorted
+5. **Any fatigue?** — CTR trends, frequency, CPC movement
+
+```
+Tell me: "Daily ads check"
+Or: "Run the 5 questions on my ads"
+Or: "How are my Meta ads doing?"
+```
+
+Script: `scripts/meta-ads.sh daily-check`
+
+### Overview
+
+Account-level summary with campaign breakdown.
+
+```
+Tell me: "Meta ads overview for last 30 days"
+```
+
+Script: `scripts/meta-ads.sh overview --preset last_30d`
+
+### Campaigns
+
+List campaigns, optionally filtered by status.
+
+```
+Tell me: "Show me active campaigns"
+```
+
+Script: `scripts/meta-ads.sh campaigns --status ACTIVE`
+
+### Top Creatives
+
+Ad-level performance ranked by results.
+
+```
+Tell me: "What are my best performing ads?"
+```
+
+Script: `scripts/meta-ads.sh top-creatives --preset last_7d`
+
+### Bleeders 🩸
+
+Ads with high spend but poor performance — candidates for pause. Flags ads with CTR < 1% or frequency > 3.5.
+
+```
+Tell me: "Any ads bleeding money?"
+Or: "Find underperforming ads"
+```
+
+Script: `scripts/meta-ads.sh bleeders --preset last_7d`
+
+### Winners 🏆
+
+Top performing ads by CTR and efficiency. These are your scale candidates.
+
+```
+Tell me: "Which ads should I scale?"
+Or: "Show me the winners"
+```
+
+Script: `scripts/meta-ads.sh winners --preset last_7d`
+
+### Fatigue Check 😴
+
+Daily breakdown to spot creative fatigue — CTR declining day-over-day, frequency climbing, CPC rising.
+
+```
+Tell me: "Any creative fatigue?"
+Or: "Check for ad fatigue"
+```
+
+Script: `scripts/meta-ads.sh fatigue-check`
+
+### Custom
+
+Full control. Specify level, fields, breakdowns.
+
+```
+Tell me: "Show me ad performance broken down by age and gender"
+```
+
+Script: `scripts/meta-ads.sh custom --level ad --fields "ad_name,spend,ctr,cpc" --breakdowns "age,gender"`
+
+For exact read-only date windows, use `--since` and `--until`. This uses the Meta Graph insights endpoint directly because `social marketing insights` only exposes date presets.
+
+```bash
 scripts/meta-ads.sh custom --level ad --since 2026-04-10 --until 2026-05-07 --fields "ad_name,campaign_name,spend,impressions,clicks,ctr,cpc,frequency,actions,cost_per_action_type"
 ```
 
-## Safety
+### Funnel Event Comparison
 
-This alias is for reporting and analysis. Do not mutate campaigns, ads, ad sets, budgets, uploads, pauses, or resumes from scheduled reporting. If a conversion event is not exposed as an attributed Meta action, report it as unavailable rather than zero.
+Compare Meta-attributed funnel events for the current window against the previous matching window.
+
+```bash
+scripts/meta-ads.sh wow-events
+scripts/meta-ads.sh wow-events --preset last_28d
+scripts/meta-ads.sh wow-events --since 2026-04-10 --until 2026-05-07 --compare-since 2026-03-13 --compare-until 2026-04-09
+```
+
+Rows include spend, traffic, InitiateCheckout, Purchase, Lead, Demo Request / Schedule, and Demo Booked / Calendly when Meta exposes an attributed custom conversion. If the Calendly signal only exists as a Website Custom Audience, report it as unavailable rather than zero.
+
+### Four-Week Funnel
+
+Rolling 28 days vs previous 28 days. This is the preferred one-off and scheduled Friday 1:00 am PT B2B funnel report input.
+
+```bash
+scripts/meta-ads.sh four-week-funnel
+scripts/meta-ads.sh four-week-funnel --as-of 2026-05-07
+```
+
+---
+
+## Date Presets
+
+- `today` — Today only
+- `yesterday` — Yesterday only
+- `last_7d` — Last 7 days (default for most reports)
+- `last_28d` — Last 28 days for funnel comparison reports
+- `last_30d` — Last 30 days
+- `last_90d` — Last 90 days
+
+---
+
+## Actions (Use With Care)
+
+Beyond reporting, social-cli can take action. These are wrapped here for the "AI ad manager" workflow but require explicit approval.
+
+### Pause a bleeder
+```bash
+social marketing pause ad AD_ID
+```
+
+### Resume a winner
+```bash
+social marketing resume ad AD_ID
+```
+
+### Shift budget
+```bash
+social marketing set-budget adset ADSET_ID --daily-budget 5000  # in cents
+```
+
+**Safety:** All mutating actions are high-risk in social-cli and require confirmation. The skill should ALWAYS present findings and recommendations first, then ask for explicit approval before taking action.
+
+---
+
+## The AI Ad Manager Workflow
+
+This is the system from the newsletter. Here's how it works in practice:
+
+**Morning (automated via cron):**
+1. Run daily-check
+2. Flag bleeders (CTR < 1%, frequency > 3.5, CPA > threshold)
+3. Flag winners (top CTR, low CPC, scaling headroom)
+4. Send summary to Telegram/Slack
+
+**You (2 minutes over coffee):**
+1. Read the summary
+2. Approve/reject recommendations
+3. Ask follow-up questions if needed
+
+**The AI (on approval):**
+1. Pause confirmed bleeders
+2. Increase budget on confirmed winners
+3. Log decisions to learnings.md
+
+---
+
+## Invocation
+
+When the user asks about Meta ads, Facebook ads, Instagram ads, or campaign performance:
+
+1. Check `workspace/brand/stack.md` for stored ad account ID
+2. Check `META_AD_ACCOUNT` env var
+3. If neither, run `social marketing accounts` to list available accounts
+4. Run the appropriate report
+5. Interpret results in context of brand goals (from stack.md/learnings.md)
+6. For bleeders/winners, present clear recommendations with reasoning
+7. **Never take action without explicit user approval**
+8. Log findings to `workspace/brand/learnings.md`
+
+### The 5 Daily Questions (Detailed)
+
+When running daily-check, frame the output around these questions:
+
+1. **"Am I on track?"** — Compare today's spend rate to daily budget. If pacing high or low, flag it.
+2. **"What's running?"** — List active campaigns with status. Flag any that should be off.
+3. **"How's the last 7 days?"** — Campaign-level metrics. Compare to previous 7 if available.
+4. **"Who's winning and who's losing?"** — Ad-level sort. Top 3 winners, bottom 3 losers with specific metrics.
+5. **"Any fatigue signals?"** — Frequency trends, CTR day-over-day, CPC movement. Concrete numbers, not vibes.
+
+---
+
+## Next Up
+
+- **`/ga4-report`** — See what Meta traffic actually does on your site. Pair with ads data to find true ROAS.
+- **`/gsc-report`** — Cross-reference paid vs organic. Are you paying for traffic you'd get free?
+- **`/creative`** — Generate new ad creatives when fatigue hits. Feed winning patterns into new concepts.
+- **`/direct-response-copy`** — Write ad copy based on what's actually converting.

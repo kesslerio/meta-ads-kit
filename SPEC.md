@@ -28,7 +28,7 @@ Authenticate your ad account → Get daily briefings with bleeders, winners, and
 │                META ADS COPILOT                       │
 │                                                       │
 │  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │  meta-ads    │  │  creative    │  │  budget    │ │
+│  │ meta-ads-mgr │  │  creative    │  │  budget    │ │
 │  │  (core)      │  │  monitor     │  │  optimizer │ │
 │  └──────┬───────┘  └──────┬───────┘  └─────┬──────┘ │
 │         │                 │                 │        │
@@ -50,7 +50,7 @@ Authenticate your ad account → Get daily briefings with bleeders, winners, and
 
 ## The 3 Skills
 
-### Skill 1: `meta-ads` (Core)
+### Skill 1: `meta-ads-manager` (Core)
 **Purpose:** Daily reporting and ad management actions
 
 **Reports:**

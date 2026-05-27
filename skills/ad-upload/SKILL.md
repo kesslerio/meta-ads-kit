@@ -616,15 +616,15 @@ This skill is the downstream piece of the Meta Ads Copilot ecosystem:
 
 - **Upstream (required):** `ad-copy-generator` — produces the asset_feed_spec JSON and copy variants that this skill uploads
 - **Upstream (trigger):** `ad-creative-monitor` — detects creative fatigue and flags ads that need copy refresh; hand off to this skill to push fresh copy
-- **Downstream:** `meta-ads` — monitor performance of the ads this skill just created; check if new copy is outperforming old
+- **Downstream:** `meta-ads-manager` — monitor performance of the ads this skill just created; check if new copy is outperforming old
 
 ### Typical Full Workflow
 
 ```
-1. meta-ads          → "Ad #238471 has frequency 4.2, CTR dropped 40% — refresh needed"
+1. meta-ads-manager  → "Ad #238471 has frequency 4.2, CTR dropped 40% — refresh needed"
 2. ad-copy-generator → Write 3 new body variants + 3 headlines matched to the image
 3. ad-upload         → Push fresh creative, attach to existing ad (preserves ad ID and history)
-4. meta-ads          → Monitor new creative performance next 7 days
+4. meta-ads-manager  → Monitor new creative performance next 7 days
 ```
 
 ### File Handoff
