@@ -11,7 +11,7 @@
 #   meta-ads.sh fatigue-check [--account act_123]
 #   meta-ads.sh wow-events [--account act_123] [--preset last_7d|last_28d]
 #   meta-ads.sh four-week-funnel [--account act_123] [--as-of YYYY-MM-DD]
-#   meta-ads.sh custom [--account act_123] [--level ad] [--fields ...] [--breakdowns ...] [--since YYYY-MM-DD --until YYYY-MM-DD]
+#   meta-ads.sh custom [--account act_123] [--level ad] [--fields ...] [--breakdowns ...] [--since YYYY-MM-DD --until YYYY-MM-DD] [--attribution-windows LIST|--unified-attribution true|false]
 
 set -euo pipefail
 
@@ -46,6 +46,10 @@ UNTIL=""
 COMPARE_SINCE=""
 COMPARE_UNTIL=""
 AS_OF=""
+ATTRIBUTION_WINDOWS=""
+UNIFIED_ATTRIBUTION=""
+ATTRIBUTION_WINDOWS_SET=0
+UNIFIED_ATTRIBUTION_SET=0
 
 # Parse args
 while [[ $# -gt 0 ]]; do
@@ -63,6 +67,8 @@ while [[ $# -gt 0 ]]; do
     --compare-since) COMPARE_SINCE="$2"; shift 2 ;;
     --compare-until) COMPARE_UNTIL="$2"; shift 2 ;;
     --as-of)      AS_OF="$2"; shift 2 ;;
+    --attribution-windows) ATTRIBUTION_WINDOWS="$2"; ATTRIBUTION_WINDOWS_SET=1; shift 2 ;;
+    --unified-attribution) UNIFIED_ATTRIBUTION="$2"; UNIFIED_ATTRIBUTION_SET=1; shift 2 ;;
     *)            echo "Unknown arg: $1" >&2; exit 1 ;;
   esac
 done
@@ -121,6 +127,37 @@ require_date() {
     echo "ERROR: $label must be YYYY-MM-DD, got: $value" >&2
     exit 2
   fi
+}
+
+validate_attribution_windows() {
+  local csv="$1"
+  local result
+  result="$(jq -nr --arg csv "$csv" '
+    ["1d_click","7d_click","28d_click","1d_view","1d_ev"] as $allowed
+    | (if $csv == "" then [""] else ($csv | split(",")) end) as $items
+    | (
+        [ range(0; $items | length) as $i
+          | $items[$i] as $item
+          | select(
+              ($allowed | index($item)) == null
+              or ([ $items[0:$i][] | select(. == $item) ] | length) > 0
+            )
+          | $item
+        ][0]
+      ) as $bad
+    | if $bad == null then "OK" else "BAD:" + $bad end
+  ')"
+  case "$result" in
+    OK) ;;
+    BAD:*)
+      echo "ERROR: unsupported attribution window: ${result#BAD:}" >&2
+      exit 2
+      ;;
+    *)
+      echo "ERROR: unsupported attribution window: ${csv}" >&2
+      exit 2
+      ;;
+  esac
 }
 
 date_offset() {
@@ -214,13 +251,40 @@ run_graph_insights_json() {
   local fields="${5:-spend,actions,cost_per_action_type}"
   local breakdowns="${6:-}"
   local limit="${7:-500}"
+  local attribution_windows="${8:-}"
+  local unified_attribution="${9:-}"
   local token account_id time_range query url
+  local api_version base windows_json unified_json include_json
+  local work data_file body status msg next_url page_count
 
   require_graph_context
+  api_version="${META_GRAPH_API_VERSION:-v19.0}"
+  if [[ ! "$api_version" =~ ^v[0-9]+\.[0-9]+$ ]]; then
+    echo "ERROR: META_GRAPH_API_VERSION must match ^v[0-9]+\.[0-9]+$, got: ${api_version}" >&2
+    exit 2
+  fi
   token="$(get_meta_token)"
   if [[ -z "$token" ]]; then
     echo "WARN: no Meta token found in META_TOKEN or ~/.social-cli/config.json" >&2
     return 1
+  fi
+
+  windows_json="null"
+  unified_json="null"
+  include_json="false"
+  if [[ -n "$attribution_windows" ]]; then
+    windows_json="$(jq -nc --arg csv "$attribution_windows" '$csv | split(",")')"
+    include_json="true"
+  fi
+  if [[ -n "$unified_attribution" ]]; then
+    case "$unified_attribution" in
+      true|false) unified_json="$unified_attribution" ;;
+      *)
+        echo "ERROR: --unified-attribution must be true or false" >&2
+        exit 2
+        ;;
+    esac
+    include_json="true"
   fi
 
   account_id="${ACCOUNT#act_}"
@@ -232,9 +296,94 @@ run_graph_insights_json() {
   if [[ -n "$breakdowns" ]]; then
     query="${query}&breakdowns=$(jq -nr --arg v "$breakdowns" '$v|@uri')"
   fi
+  if [[ "$windows_json" != "null" ]]; then
+    query="${query}&action_attribution_windows=$(jq -nr --arg v "$windows_json" '$v|@uri')"
+  fi
+  if [[ "$unified_json" != "null" ]]; then
+    query="${query}&use_unified_attribution_setting=$(jq -nr --arg v "$unified_json" '$v|@uri')"
+  fi
 
-  url="https://graph.facebook.com/v19.0/act_${account_id}/insights?${query}&access_token=${token}"
-  curl -sf "$url" > "$output"
+  base="${META_GRAPH_BASE_URL:-https://graph.facebook.com}"
+  base="${base%/}"
+  url="${base}/${api_version}/act_${account_id}/insights?${query}&access_token=${token}"
+
+  work="$(mktemp -d "${TMPDIR:-/tmp}/meta-ads-insights.XXXXXX")"
+  data_file="$work/data.json"
+  echo '[]' > "$data_file"
+  page_count=0
+  next_url="$url"
+
+  while [[ -n "$next_url" ]]; do
+    if [[ "$page_count" -ge 50 ]]; then
+      echo "ERROR: Meta Insights pagination exceeded 50 pages" >&2
+      rm -rf "$work"
+      return 1
+    fi
+    body="$work/body.json"
+    status="$(curl -s -o "$body" -w "%{http_code}" -- "$next_url" 2>/dev/null || true)"
+    if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+      msg="$(jq -r '(.error.message | select(type == "string" and length > 0)) // "unknown"' "$body" 2>/dev/null || true)"
+      [[ -z "$msg" ]] && msg="unknown"
+      echo "ERROR: Meta Insights HTTP ${status:-000}: ${msg}" >&2
+      rm -rf "$work"
+      return 1
+    fi
+    if ! jq -e 'type == "object"' "$body" >/dev/null 2>&1; then
+      echo "ERROR: Meta Insights HTTP ${status}: unknown" >&2
+      rm -rf "$work"
+      return 1
+    fi
+    if ! jq -c --slurpfile b "$body" '
+      . + ((($b[0].data // []) | if type == "array" then . else [] end))
+    ' "$data_file" > "$work/merged.json"; then
+      echo "ERROR: Meta Insights HTTP ${status}: unknown" >&2
+      rm -rf "$work"
+      return 1
+    fi
+    mv "$work/merged.json" "$data_file"
+    page_count=$((page_count + 1))
+    next_url="$(jq -r '.paging.next // empty' "$body" 2>/dev/null || true)"
+  done
+
+  if ! jq -n \
+    --slurpfile data "$data_file" \
+    --argjson windows "$windows_json" \
+    --argjson unified "$unified_json" \
+    --arg api_version "$api_version" \
+    --argjson pages "$page_count" \
+    --argjson include "$include_json" \
+    '
+      ($data[0]) as $rows
+      | def arr($v): if ($v | type) == "array" then $v else [] end;
+      def window_values_present:
+        if $windows == null then null
+        else
+          all(
+            [ $rows[] | arr(.actions)[], arr(.conversions)[], arr(.cost_per_action_type)[] ][];
+            . as $entry
+            | all($windows[]; . as $w | ($entry | type) == "object" and ($entry | has($w)))
+          )
+        end;
+      if $include then
+        {
+          data: $rows,
+          attribution: {
+            action_attribution_windows: $windows,
+            use_unified_attribution_setting: $unified,
+            api_version: $api_version,
+            pages: $pages,
+            rows: ($rows | length),
+            window_values_present: window_values_present
+          }
+        }
+      else
+        {data: $rows}
+      end
+    ' > "$output"; then
+    rm -rf "$work"
+    return 1
+  fi
+  rm -rf "$work"
 }
 
 run_social_insights_json() {
@@ -474,7 +623,7 @@ report_custom() {
     require_date "$UNTIL" "--until"
 
     local tmpfile="/tmp/meta-ads-custom-$$.json"
-    run_graph_insights_json "$tmpfile" "$SINCE" "$UNTIL" "$level" "$fields" "$BREAKDOWNS" "$LIMIT"
+    run_graph_insights_json "$tmpfile" "$SINCE" "$UNTIL" "$level" "$fields" "$BREAKDOWNS" "$LIMIT" "$ATTRIBUTION_WINDOWS" "$UNIFIED_ATTRIBUTION"
     jq . "$tmpfile"
     rm -f "$tmpfile"
     return
@@ -770,6 +919,29 @@ report_four_week_funnel() {
   PRESET="last_28d"
   report_event_comparison_for_preset
 }
+
+if [[ "$ATTRIBUTION_WINDOWS_SET" -eq 1 && "$UNIFIED_ATTRIBUTION_SET" -eq 1 ]]; then
+  echo "ERROR: --attribution-windows and --unified-attribution are mutually exclusive" >&2
+  exit 2
+fi
+if [[ "$ATTRIBUTION_WINDOWS_SET" -eq 1 ]]; then
+  validate_attribution_windows "$ATTRIBUTION_WINDOWS"
+fi
+if [[ "$UNIFIED_ATTRIBUTION_SET" -eq 1 ]]; then
+  case "$UNIFIED_ATTRIBUTION" in
+    true|false) ;;
+    *)
+      echo "ERROR: --unified-attribution must be true or false" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [[ "$ATTRIBUTION_WINDOWS_SET" -eq 1 || "$UNIFIED_ATTRIBUTION_SET" -eq 1 ]]; then
+  if [[ "$MODE" != "custom" || -z "$SINCE" || -z "$UNTIL" ]]; then
+    echo "ERROR: --attribution-windows and --unified-attribution require custom --since and --until" >&2
+    exit 2
+  fi
+fi
 
 # ============================================
 # Dispatch
