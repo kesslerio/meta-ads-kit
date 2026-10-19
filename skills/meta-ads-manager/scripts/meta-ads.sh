@@ -361,7 +361,7 @@ run_graph_insights_json() {
           all(
             [ $rows[] | arr(.actions)[], arr(.conversions)[], arr(.cost_per_action_type)[] ][];
             . as $entry
-            | all($windows[]; . as $w | ($entry | type) == "object" and ($entry | has($w)))
+            | ($entry | type) == "object" and any($windows[]; . as $w | $entry | has($w))
           )
         end;
       if $include then
