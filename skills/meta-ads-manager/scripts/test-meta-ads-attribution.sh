@@ -64,6 +64,21 @@ PAGE2 = {
         {"action_type": "purchase", "value": "4.5", "7d_click": "4.5", "1d_view": "0"}
     ],
 }
+SPARSE = {
+    "ad_id": "c",
+    "actions": [
+        {"action_type": "link_click", "value": "5", "7d_click": "5"},
+        {"action_type": "video_view", "value": "9", "1d_view": "9"},
+        {"action_type": "purchase", "value": "2", "7d_click": "1", "1d_view": "1"},
+        {"action_type": "post_interaction_net", "value": "4"}
+    ],
+}
+UNWINDOWED = {
+    "ad_id": "d",
+    "actions": [
+        {"action_type": "link_click", "value": "5"}
+    ],
+}
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -105,7 +120,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         qs = parse_qs(parsed.query)
-        if qs.get("page", ["1"])[0] == "2":
+        if mode in ("sparse", "unwindowed"):
+            payload = {"data": [SPARSE if mode == "sparse" else UNWINDOWED]}
+        elif qs.get("page", ["1"])[0] == "2":
             payload = {"data": [PAGE2]}
         else:
             host = self.headers.get("Host", "127.0.0.1")
@@ -212,6 +229,26 @@ if [[ "$rc" -eq 0 ]] && jq -e '
   pass "attribution contract"
 else
   fail "attribution contract"
+  cat "$OUT" >&2 || true
+fi
+
+reset_log
+echo sparse > "$MODE_FILE"
+rc="$(capture "$OUT" "$ERR" custom --since 2026-01-01 --until 2026-01-07 --level ad --fields spend,actions --limit 50 --attribution-windows '7d_click,1d_view')"
+if [[ "$rc" -eq 0 ]] && jq -e '.attribution.window_values_present == true' "$OUT" >/dev/null; then
+  pass "zero-value and unattributable entries do not hide a windowed response"
+else
+  fail "zero-value and unattributable entries do not hide a windowed response (rc=${rc})"
+  cat "$OUT" >&2 || true
+fi
+
+reset_log
+echo unwindowed > "$MODE_FILE"
+rc="$(capture "$OUT" "$ERR" custom --since 2026-01-01 --until 2026-01-07 --level ad --fields spend,actions --limit 50 --attribution-windows '7d_click,1d_view')"
+if [[ "$rc" -eq 0 ]] && jq -e '.attribution.window_values_present == false' "$OUT" >/dev/null; then
+  pass "a response with no requested window anywhere is not windowed"
+else
+  fail "a response with no requested window anywhere is not windowed (rc=${rc})"
   cat "$OUT" >&2 || true
 fi
 
