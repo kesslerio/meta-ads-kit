@@ -69,7 +69,8 @@ SPARSE = {
     "actions": [
         {"action_type": "link_click", "value": "5", "7d_click": "5"},
         {"action_type": "video_view", "value": "9", "1d_view": "9"},
-        {"action_type": "purchase", "value": "2", "7d_click": "1", "1d_view": "1"}
+        {"action_type": "purchase", "value": "2", "7d_click": "1", "1d_view": "1"},
+        {"action_type": "post_interaction_net", "value": "4"}
     ],
 }
 UNWINDOWED = {
@@ -235,9 +236,9 @@ reset_log
 echo sparse > "$MODE_FILE"
 rc="$(capture "$OUT" "$ERR" custom --since 2026-01-01 --until 2026-01-07 --level ad --fields spend,actions --limit 50 --attribution-windows '7d_click,1d_view')"
 if [[ "$rc" -eq 0 ]] && jq -e '.attribution.window_values_present == true' "$OUT" >/dev/null; then
-  pass "windows omitted for zero values still count as present"
+  pass "zero-value and unattributable entries do not hide a windowed response"
 else
-  fail "windows omitted for zero values still count as present (rc=${rc})"
+  fail "zero-value and unattributable entries do not hide a windowed response (rc=${rc})"
   cat "$OUT" >&2 || true
 fi
 
@@ -245,9 +246,9 @@ reset_log
 echo unwindowed > "$MODE_FILE"
 rc="$(capture "$OUT" "$ERR" custom --since 2026-01-01 --until 2026-01-07 --level ad --fields spend,actions --limit 50 --attribution-windows '7d_click,1d_view')"
 if [[ "$rc" -eq 0 ]] && jq -e '.attribution.window_values_present == false' "$OUT" >/dev/null; then
-  pass "entries without any requested window are not windowed"
+  pass "a response with no requested window anywhere is not windowed"
 else
-  fail "entries without any requested window are not windowed (rc=${rc})"
+  fail "a response with no requested window anywhere is not windowed (rc=${rc})"
   cat "$OUT" >&2 || true
 fi
 
